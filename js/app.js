@@ -56,13 +56,44 @@ function showToast(message) {
     document.body.appendChild(stack);
   }
   const template = document.querySelector("#toast-template");
-  const node = template.content.firstElementChild.cloneNode(true);
+  const node = template?.content?.firstElementChild?.cloneNode(true) || document.createElement("div");
+  node.className = node.className || "toast";
   node.textContent = message;
   stack.appendChild(node);
   setTimeout(() => {
     node.remove();
     if (!stack.children.length) stack.remove();
   }, 2400);
+}
+
+function renderFatalError(error) {
+  console.error("Fatal app error", error);
+  if (!app) return;
+  app.innerHTML = `
+    <section class="screen">
+      <section class="panel hero">
+        <p class="eyebrow">Runtime recovery</p>
+        <h2>The app hit an error and recovered safely</h2>
+        <p>Try reloading once. If this persists, use Reset Local Data below to clear stale saved state or cached assets.</p>
+      </section>
+      <section class="panel">
+        <div class="button-row">
+          <button type="button" class="primary-button" data-action="reload-app">Reload App</button>
+          <button type="button" class="secondary-button" data-action="reset-local-data">Reset Local Data</button>
+          <button type="button" class="secondary-button" data-action="nav-home">Go Home</button>
+        </div>
+        <p class="footer-note" style="margin-top: 12px;">Open the browser console for the exact stack trace.</p>
+      </section>
+    </section>
+  `;
+}
+
+function safeRender() {
+  try {
+    render();
+  } catch (error) {
+    renderFatalError(error);
+  }
 }
 
 function updateNav(active) {
@@ -74,7 +105,7 @@ function setScreen(nextScreen) {
     clearTimer();
   }
   screen = nextScreen;
-  render();
+  safeRender();
 }
 
 function currentRunOrHome() {
@@ -87,6 +118,10 @@ function currentRunOrHome() {
 }
 
 function render() {
+  if (!app) {
+    throw new Error("#app container not found");
+  }
+
   document.body.classList.toggle("low-motion", !!state.settings.lowMotion);
 
   if (screen === "home") {
@@ -184,7 +219,7 @@ function ensureGameplayState() {
     transient.gameplay.timeLeft = null;
   }
 
-  render();
+  safeRender();
 }
 
 let timerHandle = null;
@@ -205,7 +240,7 @@ function startTimer() {
       autoSubmitOnTimeout();
       return;
     }
-    render();
+    safeRender();
   }, 1000);
 }
 
@@ -328,13 +363,16 @@ function handleNav(target) {
 }
 
 document.addEventListener("click", (event) => {
-  const actionEl = event.target.closest("[data-action]");
-  const navEl = event.target.closest("[data-nav]");
-  const optionEl = event.target.closest("[data-option-id]");
-  const allocationEl = event.target.closest("[data-allocation-id]");
-  const priorityEl = event.target.closest("[data-priority-id]");
-  const contradictionEl = event.target.closest("[data-contradiction-id]");
-  const settingEl = event.target.closest("[data-setting-toggle]");
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+
+  const actionEl = target.closest("[data-action]");
+  const navEl = target.closest("[data-nav]");
+  const optionEl = target.closest("[data-option-id]");
+  const allocationEl = target.closest("[data-allocation-id]");
+  const priorityEl = target.closest("[data-priority-id]");
+  const contradictionEl = target.closest("[data-contradiction-id]");
+  const settingEl = target.closest("[data-setting-toggle]");
 
   if (navEl) {
     handleNav(navEl.dataset.nav);
@@ -343,7 +381,7 @@ document.addEventListener("click", (event) => {
 
   if (optionEl) {
     transient.gameplay.selected = optionEl.dataset.optionId;
-    render();
+    safeRender();
     return;
   }
 
@@ -352,13 +390,13 @@ document.addEventListener("click", (event) => {
     const selected = new Set(transient.gameplay.selectedIds || []);
     selected.has(id) ? selected.delete(id) : selected.add(id);
     transient.gameplay.selectedIds = [...selected];
-    render();
+    safeRender();
     return;
   }
 
   if (priorityEl) {
     transient.gameplay.rankedIds = [...(transient.gameplay.rankedIds || []), priorityEl.dataset.priorityId];
-    render();
+    safeRender();
     return;
   }
 
@@ -368,7 +406,7 @@ document.addEventListener("click", (event) => {
     if (selected.has(id)) selected.delete(id);
     else if (selected.size < 3) selected.add(id);
     transient.gameplay.selectedIds = [...selected];
-    render();
+    safeRender();
     return;
   }
 
@@ -376,7 +414,7 @@ document.addEventListener("click", (event) => {
     const key = settingEl.dataset.settingToggle;
     state.settings[key] = !state.settings[key];
     persist();
-    render();
+    safeRender();
     return;
   }
 
@@ -384,6 +422,7 @@ document.addEventListener("click", (event) => {
   const { action } = actionEl.dataset;
 
   if (action === "new-run") return setScreen("new-run");
+  if (action === "reload-app") return window.location.reload();
 
   if (action === "confirm-new-run") {
     const modeId = document.querySelector("#mode-select")?.value || state.settings.mode || "standard";
@@ -410,12 +449,13 @@ document.addEventListener("click", (event) => {
 
   if (action === "clear-priority") {
     transient.gameplay.rankedIds = [];
-    return render();
+    return safeRender();
   }
 
   if (action === "nav-home") return handleNav("home");
   if (action === "nav-help") return handleNav("help");
   if (action === "nav-history") return handleNav("history");
+  if (action === "nav-settings") return handleNav("settings");
 
   if (action === "reset-local-data") {
     clearTimer();
@@ -429,12 +469,21 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  if (event.target.matches("#mode-select")) syncModeDescription();
+  const target = event.target;
+  if (target instanceof Element && target.matches("#mode-select")) syncModeDescription();
 });
 
 window.addEventListener("beforeunload", () => {
   clearTimer();
   persist();
+});
+
+window.addEventListener("error", (event) => {
+  renderFatalError(event.error || new Error(event.message || "Unknown runtime error"));
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  renderFatalError(event.reason instanceof Error ? event.reason : new Error(String(event.reason)));
 });
 
 window.addEventListener("appinstalled", () => {
@@ -466,4 +515,4 @@ if ("serviceWorker" in navigator) {
 }
 
 persist();
-render();
+safeRender();

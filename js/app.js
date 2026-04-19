@@ -42,6 +42,8 @@ let transient = {
   finishedRun: null,
   runSummary: null,
 };
+let timerHandle = null;
+let hasReloadedFromSwUpdate = false;
 
 function persist() {
   const didSave = saveState(state);
@@ -100,6 +102,13 @@ function updateNav(active) {
   navButtons.forEach((button) => button.classList.toggle("active", button.dataset.nav === active));
 }
 
+function clearTimer() {
+  if (timerHandle) {
+    clearInterval(timerHandle);
+    timerHandle = null;
+  }
+}
+
 function setScreen(nextScreen) {
   if (screen === "gameplay" && nextScreen !== "gameplay") {
     clearTimer();
@@ -118,11 +127,8 @@ function currentRunOrHome() {
 }
 
 function render() {
-  if (!app) {
-    throw new Error("#app container not found");
-  }
-
-  document.body.classList.toggle("low-motion", !!state.settings.lowMotion);
+  if (!app) throw new Error("#app container not found");
+  document.body.classList.toggle("low-motion", !!state.settings?.lowMotion);
 
   if (screen === "home") {
     updateNav("home");
@@ -222,14 +228,6 @@ function ensureGameplayState() {
   safeRender();
 }
 
-let timerHandle = null;
-function clearTimer() {
-  if (timerHandle) {
-    clearInterval(timerHandle);
-    timerHandle = null;
-  }
-}
-
 function startTimer() {
   clearTimer();
   timerHandle = setInterval(() => {
@@ -252,23 +250,16 @@ function autoSubmitOnTimeout() {
 function submitLevel() {
   const run = currentRunOrHome();
   if (!run) return;
-
   clearTimer();
   const level = getCurrentLevel(run);
   let evaluation;
 
   try {
-    if (level.type === "decision") {
-      evaluation = evaluateDecisionLevel(run, level, transient.gameplay.selected);
-    } else if (level.type === "allocation") {
-      evaluation = evaluateAllocationLevel(run, level, transient.gameplay.selectedIds || []);
-    } else if (level.type === "priority") {
-      evaluation = evaluatePriorityLevel(run, level, transient.gameplay.rankedIds || []);
-    } else if (level.type === "contradiction") {
-      evaluation = evaluateContradictionLevel(run, level, transient.gameplay.selectedIds || []);
-    } else {
-      throw new Error(`Unsupported level type: ${level.type}`);
-    }
+    if (level.type === "decision") evaluation = evaluateDecisionLevel(run, level, transient.gameplay.selected);
+    else if (level.type === "allocation") evaluation = evaluateAllocationLevel(run, level, transient.gameplay.selectedIds || []);
+    else if (level.type === "priority") evaluation = evaluatePriorityLevel(run, level, transient.gameplay.rankedIds || []);
+    else if (level.type === "contradiction") evaluation = evaluateContradictionLevel(run, level, transient.gameplay.selectedIds || []);
+    else throw new Error(`Unsupported level type: ${level.type}`);
   } catch (error) {
     console.error("Failed to submit level", error);
     showToast("A submission error occurred. The level was not advanced.");
@@ -287,12 +278,7 @@ function submitLevel() {
     normalizedScore: result.normalizedScore,
     outcomeLabel: result.outcomeLabel,
   });
-  run.decisions.push({
-    stageId: getCurrentStage(run).id,
-    levelId: level.id,
-    result,
-    at: Date.now(),
-  });
+  run.decisions.push({ stageId: getCurrentStage(run).id, levelId: level.id, result, at: Date.now() });
 
   state.currentRun = sanitizeRun(run);
   persist();
@@ -303,7 +289,6 @@ function submitLevel() {
 function advanceAfterOutcome() {
   const run = currentRunOrHome();
   if (!run) return;
-
   const stage = getCurrentStage(run);
   const finishedStage = run.currentLevelIndex >= stage.levels.length - 1;
 
@@ -332,20 +317,17 @@ function continueAfterStage() {
   if (run.currentStageIndex >= STAGES.length) {
     const finishedRun = JSON.parse(JSON.stringify(run));
     const summary = summarizeRun(finishedRun);
-    const completedEntry = {
+    state.history.unshift({
       id: finishedRun.id,
       modeId: finishedRun.modeId,
       completedAt: Date.now(),
       averageScore: summary.averageScore,
       finalStats: summary.finalStats,
       profile: summary.profile,
-    };
-
-    state.history.unshift(completedEntry);
+    });
     state.currentRun = null;
     state.unlockedModes = unlockModesFromState(state);
     persist();
-
     transient.finishedRun = finishedRun;
     transient.runSummary = summary;
     return setScreen("final-analysis");
@@ -374,15 +356,11 @@ document.addEventListener("click", (event) => {
   const contradictionEl = target.closest("[data-contradiction-id]");
   const settingEl = target.closest("[data-setting-toggle]");
 
-  if (navEl) {
-    handleNav(navEl.dataset.nav);
-    return;
-  }
+  if (navEl) return handleNav(navEl.dataset.nav);
 
   if (optionEl) {
     transient.gameplay.selected = optionEl.dataset.optionId;
-    safeRender();
-    return;
+    return safeRender();
   }
 
   if (allocationEl) {
@@ -390,14 +368,12 @@ document.addEventListener("click", (event) => {
     const selected = new Set(transient.gameplay.selectedIds || []);
     selected.has(id) ? selected.delete(id) : selected.add(id);
     transient.gameplay.selectedIds = [...selected];
-    safeRender();
-    return;
+    return safeRender();
   }
 
   if (priorityEl) {
     transient.gameplay.rankedIds = [...(transient.gameplay.rankedIds || []), priorityEl.dataset.priorityId];
-    safeRender();
-    return;
+    return safeRender();
   }
 
   if (contradictionEl) {
@@ -406,16 +382,14 @@ document.addEventListener("click", (event) => {
     if (selected.has(id)) selected.delete(id);
     else if (selected.size < 3) selected.add(id);
     transient.gameplay.selectedIds = [...selected];
-    safeRender();
-    return;
+    return safeRender();
   }
 
   if (settingEl) {
     const key = settingEl.dataset.settingToggle;
     state.settings[key] = !state.settings[key];
     persist();
-    safeRender();
-    return;
+    return safeRender();
   }
 
   if (!actionEl) return;
@@ -423,43 +397,36 @@ document.addEventListener("click", (event) => {
 
   if (action === "new-run") return setScreen("new-run");
   if (action === "reload-app") return window.location.reload();
-
   if (action === "confirm-new-run") {
     const modeId = document.querySelector("#mode-select")?.value || state.settings.mode || "standard";
     return startNewRun(modeId);
   }
-
   if (action === "continue-run" && state.currentRun) {
     resetTransientGameplay();
     return setScreen("stage-intro");
   }
-
   if (action === "show-briefing") return setScreen("briefing");
   if (action === "back-stage-intro") return setScreen("stage-intro");
-
   if (action === "begin-level") {
     resetTransientGameplay();
     setScreen("gameplay");
     return ensureGameplayState();
   }
-
   if (action === "submit-level") return submitLevel();
   if (action === "advance-after-outcome") return advanceAfterOutcome();
   if (action === "continue-after-stage") return continueAfterStage();
-
   if (action === "clear-priority") {
     transient.gameplay.rankedIds = [];
     return safeRender();
   }
-
   if (action === "nav-home") return handleNav("home");
   if (action === "nav-help") return handleNav("help");
   if (action === "nav-history") return handleNav("history");
   if (action === "nav-settings") return handleNav("settings");
-
   if (action === "reset-local-data") {
     clearTimer();
     state = resetState();
+    state.currentRun = sanitizeRun(state.currentRun);
     state.unlockedModes = unlockModesFromState(state);
     transient = { gameplay: {}, pendingResult: null, deferredPrompt: transient.deferredPrompt, finishedRun: null, runSummary: null };
     persist();
@@ -506,13 +473,35 @@ installBtn?.addEventListener("click", async () => {
   installBtn.classList.add("hidden");
 });
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./service-worker.js").catch((error) => {
-      console.error("Service worker registration failed", error);
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.register("./service-worker.js");
+
+    registration.addEventListener("updatefound", () => {
+      const worker = registration.installing;
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) {
+          showToast("App updated. Reloading fresh files.");
+        }
+      });
     });
-  });
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hasReloadedFromSwUpdate) return;
+      hasReloadedFromSwUpdate = true;
+      window.location.reload();
+    });
+
+    setInterval(() => {
+      registration.update().catch((error) => console.error("Service worker update check failed", error));
+    }, 60 * 1000);
+  } catch (error) {
+    console.error("Service worker registration failed", error);
+  }
 }
 
 persist();
 safeRender();
+window.addEventListener("load", registerServiceWorker);

@@ -103,6 +103,7 @@ export function renderHome(state) {
 
 export function renderNewRun(state) {
   const unlocked = state.unlockedModes || ["standard"];
+  const preferredMode = unlocked.includes(state.settings.mode) ? state.settings.mode : unlocked[0] || "standard";
   return `
     <section class="screen">
       <section class="panel hero">
@@ -116,7 +117,7 @@ export function renderNewRun(state) {
           <label for="mode-select">Game mode</label>
           <select id="mode-select">
             ${Object.values(MODES).map((mode) => `
-              <option value="${mode.id}" ${!unlocked.includes(mode.id) ? "disabled" : ""}>
+              <option value="${mode.id}" ${preferredMode === mode.id ? "selected" : ""} ${!unlocked.includes(mode.id) ? "disabled" : ""}>
                 ${mode.title}${!unlocked.includes(mode.id) ? " — locked" : ""}
               </option>
             `).join("")}
@@ -138,7 +139,7 @@ export function renderStageIntro(run) {
   return `
     <section class="screen">
       <section class="panel hero">
-        <p class="eyebrow">Stage ${run.currentStageIndex + 1} of ${STAGES.length}</p>
+        <p class="eyebrow">Stage ${Math.min(run.currentStageIndex + 1, STAGES.length)} of ${STAGES.length}</p>
         <h2>${stage.title}</h2>
         <p>${stage.intro}</p>
       </section>
@@ -162,7 +163,7 @@ export function renderStageIntro(run) {
 export function renderBriefing(run) {
   const stage = getCurrentStage(run);
   const level = getCurrentLevel(run);
-  const timing = level.timed ? `${formatDuration(level.timeLimit)} timer` : "Untimed";
+  const timing = level.timed ? `${formatDuration(level.timeLimit)} base timer` : "Untimed";
   return `
     <section class="screen">
       <section class="panel hero">
@@ -339,8 +340,9 @@ export function renderOutcome(run, result) {
 }
 
 export function renderStageDebrief(run) {
-  const stage = STAGES[run.currentStageIndex - 1];
-  const stageRecord = run.stageProgress[run.currentStageIndex - 1];
+  const stageIndex = Math.max(0, Math.min(run.currentStageIndex - 1, STAGES.length - 1));
+  const stage = STAGES[stageIndex];
+  const stageRecord = run.stageProgress[stageIndex];
   const avg = stageAverage(stageRecord.levelResults);
   return `
     <section class="screen">
@@ -435,7 +437,7 @@ export function renderHistory(state) {
                   <strong>${titleCase(run.modeId)}</strong>
                   <span class="badge">${run.averageScore}/100</span>
                 </div>
-                <p class="meta">${formatDate(run.completedAt)} · Final weaknesses: ${run.profile.weaknesses.join(", ")}</p>
+                <p class="meta">${formatDate(run.completedAt)} · Final weaknesses: ${(run.profile?.weaknesses || []).join(", ") || "Not available"}</p>
               </div>
             `).join("")}
           </div>

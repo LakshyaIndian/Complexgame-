@@ -1,4 +1,4 @@
-import { MODES } from "./gameData.js";
+import { MODES, STAGES } from "./gameData.js";
 import { loadState, saveState, resetState } from "./storage.js";
 import {
   createRun,
@@ -9,6 +9,7 @@ import {
   evaluatePriorityLevel,
   getCurrentLevel,
   getCurrentStage,
+  sanitizeRun,
   summarizeRun,
   unlockModesFromState,
 } from "./scoring.js";
@@ -31,15 +32,20 @@ const installBtn = document.querySelector("#install-btn");
 const navButtons = Array.from(document.querySelectorAll(".nav-button"));
 
 let state = loadState();
+state.currentRun = sanitizeRun(state.currentRun);
+state.unlockedModes = unlockModesFromState(state);
 let screen = state.currentRun ? "stage-intro" : "home";
 let transient = {
   gameplay: {},
   pendingResult: null,
   deferredPrompt: null,
+  finishedRun: null,
+  runSummary: null,
 };
 
 function persist() {
-  saveState(state);
+  const didSave = saveState(state);
+  if (!didSave) console.warn("State could not be persisted on this device/browser.");
 }
 
 function showToast(message) {
@@ -63,53 +69,69 @@ function updateNav(active) {
   navButtons.forEach((button) => button.classList.toggle("active", button.dataset.nav === active));
 }
 
+function setScreen(nextScreen) {
+  if (screen === "gameplay" && nextScreen !== "gameplay") {
+    clearTimer();
+  }
+  screen = nextScreen;
+  render();
+}
+
+function currentRunOrHome() {
+  if (!state.currentRun) {
+    setScreen("home");
+    return null;
+  }
+  state.currentRun = sanitizeRun(state.currentRun);
+  return state.currentRun;
+}
+
 function render() {
   document.body.classList.toggle("low-motion", !!state.settings.lowMotion);
 
   if (screen === "home") {
     updateNav("home");
     app.innerHTML = renderHome(state);
-  }
-  if (screen === "new-run") {
+  } else if (screen === "new-run") {
     updateNav("home");
     app.innerHTML = renderNewRun(state);
     syncModeDescription();
-  }
-  if (screen === "stage-intro") {
+  } else if (screen === "stage-intro") {
+    if (!currentRunOrHome()) return;
     updateNav("home");
     app.innerHTML = renderStageIntro(state.currentRun);
-  }
-  if (screen === "briefing") {
+  } else if (screen === "briefing") {
+    if (!currentRunOrHome()) return;
     updateNav("home");
     app.innerHTML = renderBriefing(state.currentRun);
-  }
-  if (screen === "gameplay") {
+  } else if (screen === "gameplay") {
+    if (!currentRunOrHome()) return;
     updateNav("home");
     app.innerHTML = renderGameplay(state.currentRun, transient.gameplay);
-  }
-  if (screen === "outcome") {
+  } else if (screen === "outcome") {
+    if (!currentRunOrHome() || !transient.pendingResult) return setScreen("home");
     updateNav("home");
     app.innerHTML = renderOutcome(state.currentRun, transient.pendingResult);
-  }
-  if (screen === "stage-debrief") {
+  } else if (screen === "stage-debrief") {
+    if (!currentRunOrHome()) return;
     updateNav("home");
     app.innerHTML = renderStageDebrief(state.currentRun);
-  }
-  if (screen === "final-analysis") {
+  } else if (screen === "final-analysis") {
     updateNav("home");
+    if (!transient.runSummary || !transient.finishedRun) return setScreen("home");
     app.innerHTML = renderFinalAnalysis(transient.runSummary, transient.finishedRun);
-  }
-  if (screen === "history") {
+  } else if (screen === "history") {
     updateNav("history");
     app.innerHTML = renderHistory(state);
-  }
-  if (screen === "settings") {
+  } else if (screen === "settings") {
     updateNav("settings");
     app.innerHTML = renderSettings(state);
-  }
-  if (screen === "help") {
+  } else if (screen === "help") {
     updateNav("help");
     app.innerHTML = renderHelp();
+  } else {
+    updateNav("home");
+    app.innerHTML = renderHome(state);
   }
 }
 
@@ -117,26 +139,51 @@ function syncModeDescription() {
   const select = document.querySelector("#mode-select");
   const target = document.querySelector("#mode-description");
   if (!select || !target) return;
-  const mode = MODES[select.value];
+  const mode = MODES[select.value] || MODES.standard;
   target.innerHTML = `<strong>${mode.title}:</strong> ${mode.description}`;
 }
 
+function resetTransientGameplay() {
+  transient.gameplay = {
+    selected: null,
+    selectedIds: [],
+    rankedIds: [],
+    timeLeft: null,
+  };
+}
+
 function startNewRun(modeId) {
+  clearTimer();
   state.currentRun = createRun(modeId);
+  state.settings.mode = state.currentRun.modeId;
+  transient.pendingResult = null;
+  transient.finishedRun = null;
+  transient.runSummary = null;
+  resetTransientGameplay();
   persist();
-  transient.gameplay = {};
-  screen = "stage-intro";
-  render();
+  setScreen("stage-intro");
 }
 
 function ensureGameplayState() {
-  const level = getCurrentLevel(state.currentRun);
-  transient.gameplay = transient.gameplay || {};
-  if (level.timed && transient.gameplay.timeLeft == null) {
-    const multiplier = MODES[state.currentRun.modeId]?.timeMultiplier || 1;
-    transient.gameplay.timeLeft = Math.max(10, Math.floor(level.timeLimit * multiplier));
+  const run = currentRunOrHome();
+  if (!run) return;
+  const level = getCurrentLevel(run);
+
+  transient.gameplay = {
+    selected: transient.gameplay.selected ?? null,
+    selectedIds: Array.isArray(transient.gameplay.selectedIds) ? transient.gameplay.selectedIds : [],
+    rankedIds: Array.isArray(transient.gameplay.rankedIds) ? transient.gameplay.rankedIds : [],
+    timeLeft: transient.gameplay.timeLeft ?? null,
+  };
+
+  if (level.timed) {
+    const multiplier = MODES[run.modeId]?.timeMultiplier || 1;
+    transient.gameplay.timeLeft = transient.gameplay.timeLeft ?? Math.max(10, Math.floor(level.timeLimit * multiplier));
     startTimer();
+  } else {
+    transient.gameplay.timeLeft = null;
   }
+
   render();
 }
 
@@ -152,43 +199,52 @@ function startTimer() {
   clearTimer();
   timerHandle = setInterval(() => {
     if (screen !== "gameplay") return;
-    transient.gameplay.timeLeft -= 1;
+    transient.gameplay.timeLeft = Math.max(0, (transient.gameplay.timeLeft || 0) - 1);
     if (transient.gameplay.timeLeft <= 0) {
-      transient.gameplay.timeLeft = 0;
       clearTimer();
       autoSubmitOnTimeout();
+      return;
     }
     render();
   }, 1000);
 }
 
 function autoSubmitOnTimeout() {
-  showToast("Time expired. Submitting current state.");
+  showToast("Time expired. Resolving with your current state.");
   submitLevel();
 }
 
 function submitLevel() {
+  const run = currentRunOrHome();
+  if (!run) return;
+
   clearTimer();
-  const run = state.currentRun;
   const level = getCurrentLevel(run);
   let evaluation;
 
-  if (level.type === "decision") {
-    evaluation = evaluateDecisionLevel(run, level, transient.gameplay.selected);
-  }
-  if (level.type === "allocation") {
-    evaluation = evaluateAllocationLevel(run, level, transient.gameplay.selectedIds || []);
-  }
-  if (level.type === "priority") {
-    const rankedIds = transient.gameplay.rankedIds || [];
-    evaluation = evaluatePriorityLevel(run, level, rankedIds);
-  }
-  if (level.type === "contradiction") {
-    evaluation = evaluateContradictionLevel(run, level, transient.gameplay.selectedIds || []);
+  try {
+    if (level.type === "decision") {
+      evaluation = evaluateDecisionLevel(run, level, transient.gameplay.selected);
+    } else if (level.type === "allocation") {
+      evaluation = evaluateAllocationLevel(run, level, transient.gameplay.selectedIds || []);
+    } else if (level.type === "priority") {
+      evaluation = evaluatePriorityLevel(run, level, transient.gameplay.rankedIds || []);
+    } else if (level.type === "contradiction") {
+      evaluation = evaluateContradictionLevel(run, level, transient.gameplay.selectedIds || []);
+    } else {
+      throw new Error(`Unsupported level type: ${level.type}`);
+    }
+  } catch (error) {
+    console.error("Failed to submit level", error);
+    showToast("A submission error occurred. The level was not advanced.");
+    resetTransientGameplay();
+    persist();
+    return setScreen("stage-intro");
   }
 
   const result = finalizeLevel(run, level, evaluation);
   run.stats = result.statsAfter;
+  run.totalScore = (run.totalScore || 0) + result.normalizedScore;
   run.updatedAt = Date.now();
   run.stageProgress[run.currentStageIndex].levelResults.push({
     levelId: level.id,
@@ -203,15 +259,16 @@ function submitLevel() {
     at: Date.now(),
   });
 
-  state.currentRun = run;
+  state.currentRun = sanitizeRun(run);
   persist();
   transient.pendingResult = result;
-  screen = "outcome";
-  render();
+  setScreen("outcome");
 }
 
 function advanceAfterOutcome() {
-  const run = state.currentRun;
+  const run = currentRunOrHome();
+  if (!run) return;
+
   const stage = getCurrentStage(run);
   const finishedStage = run.currentLevelIndex >= stage.levels.length - 1;
 
@@ -219,26 +276,26 @@ function advanceAfterOutcome() {
     run.stageProgress[run.currentStageIndex].completed = true;
     run.currentStageIndex += 1;
     run.currentLevelIndex = 0;
-    state.currentRun = run;
+    state.currentRun = run.currentStageIndex >= STAGES.length ? run : sanitizeRun(run);
     persist();
-    screen = "stage-debrief";
-    render();
-    return;
+    transient.pendingResult = null;
+    return setScreen("stage-debrief");
   }
 
   run.currentLevelIndex += 1;
-  state.currentRun = run;
+  state.currentRun = sanitizeRun(run);
   persist();
-  transient.gameplay = {};
-  screen = "stage-intro";
-  render();
+  transient.pendingResult = null;
+  resetTransientGameplay();
+  setScreen("stage-intro");
 }
 
 function continueAfterStage() {
-  if (!state.currentRun) return;
+  const run = state.currentRun;
+  if (!run) return;
 
-  if (state.currentRun.currentStageIndex >= 6) {
-    const finishedRun = structuredClone(state.currentRun);
+  if (run.currentStageIndex >= STAGES.length) {
+    const finishedRun = JSON.parse(JSON.stringify(run));
     const summary = summarizeRun(finishedRun);
     const completedEntry = {
       id: finishedRun.id,
@@ -256,19 +313,18 @@ function continueAfterStage() {
 
     transient.finishedRun = finishedRun;
     transient.runSummary = summary;
-    screen = "final-analysis";
-    render();
-    return;
+    return setScreen("final-analysis");
   }
 
-  transient.gameplay = {};
-  screen = "stage-intro";
-  render();
+  resetTransientGameplay();
+  setScreen("stage-intro");
 }
 
 function handleNav(target) {
-  screen = target;
-  render();
+  if (target === "home") return setScreen("home");
+  if (target === "history") return setScreen("history");
+  if (target === "help") return setScreen("help");
+  if (target === "settings") return setScreen("settings");
 }
 
 document.addEventListener("click", (event) => {
@@ -325,68 +381,50 @@ document.addEventListener("click", (event) => {
   }
 
   if (!actionEl) return;
-
   const { action } = actionEl.dataset;
 
-  if (action === "new-run") {
-    screen = "new-run";
-    render();
-  }
+  if (action === "new-run") return setScreen("new-run");
 
   if (action === "confirm-new-run") {
-    const modeId = document.querySelector("#mode-select")?.value || "standard";
-    startNewRun(modeId);
+    const modeId = document.querySelector("#mode-select")?.value || state.settings.mode || "standard";
+    return startNewRun(modeId);
   }
 
   if (action === "continue-run" && state.currentRun) {
-    screen = "stage-intro";
-    render();
+    resetTransientGameplay();
+    return setScreen("stage-intro");
   }
 
-  if (action === "show-briefing") {
-    screen = "briefing";
-    render();
-  }
-
-  if (action === "back-stage-intro") {
-    screen = "stage-intro";
-    render();
-  }
+  if (action === "show-briefing") return setScreen("briefing");
+  if (action === "back-stage-intro") return setScreen("stage-intro");
 
   if (action === "begin-level") {
-    screen = "gameplay";
-    transient.gameplay = {};
-    ensureGameplayState();
+    resetTransientGameplay();
+    setScreen("gameplay");
+    return ensureGameplayState();
   }
 
-  if (action === "submit-level") {
-    submitLevel();
-  }
-
-  if (action === "advance-after-outcome") {
-    advanceAfterOutcome();
-  }
-
-  if (action === "continue-after-stage") {
-    continueAfterStage();
-  }
+  if (action === "submit-level") return submitLevel();
+  if (action === "advance-after-outcome") return advanceAfterOutcome();
+  if (action === "continue-after-stage") return continueAfterStage();
 
   if (action === "clear-priority") {
     transient.gameplay.rankedIds = [];
-    render();
+    return render();
   }
 
-  if (action === "nav-home") handleNav("home");
-  if (action === "nav-help") handleNav("help");
-  if (action === "nav-history") handleNav("history");
+  if (action === "nav-home") return handleNav("home");
+  if (action === "nav-help") return handleNav("help");
+  if (action === "nav-history") return handleNav("history");
 
   if (action === "reset-local-data") {
+    clearTimer();
     state = resetState();
-    transient = { gameplay: {}, pendingResult: null, deferredPrompt: transient.deferredPrompt };
-    screen = "home";
+    state.unlockedModes = unlockModesFromState(state);
+    transient = { gameplay: {}, pendingResult: null, deferredPrompt: transient.deferredPrompt, finishedRun: null, runSummary: null };
     persist();
     showToast("Local data cleared.");
-    render();
+    return setScreen("home");
   }
 });
 
@@ -400,7 +438,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 window.addEventListener("appinstalled", () => {
-  installBtn.classList.add("hidden");
+  installBtn?.classList.add("hidden");
   transient.deferredPrompt = null;
   showToast("App installed.");
 });
@@ -408,10 +446,10 @@ window.addEventListener("appinstalled", () => {
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   transient.deferredPrompt = event;
-  installBtn.classList.remove("hidden");
+  installBtn?.classList.remove("hidden");
 });
 
-installBtn.addEventListener("click", async () => {
+installBtn?.addEventListener("click", async () => {
   if (!transient.deferredPrompt) return;
   transient.deferredPrompt.prompt();
   await transient.deferredPrompt.userChoice;
@@ -427,4 +465,5 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+persist();
 render();

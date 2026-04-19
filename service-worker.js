@@ -1,4 +1,4 @@
-const CACHE_NAME = "frs2050-cache-v1";
+const CACHE_NAME = "frs2050-cache-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -33,16 +33,47 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
+  const { request } = event;
+  if (request.method !== "GET") return;
 
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
+  const url = new URL(request.url);
+  const isSameOrigin = url.origin === self.location.origin;
+  const isNavigation = request.mode === "navigate";
 
-      return fetch(event.request)
+  if (!isSameOrigin) {
+    if (isNavigation) {
+      event.respondWith(
+        fetch(request).catch(() => caches.match("./index.html"))
+      );
+    }
+    return;
+  }
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(request)
         .then((response) => {
           const responseClone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
+          return response;
+        })
+        .catch(() => caches.match(request).then((cached) => cached || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      if (cached) return cached;
+
+      return fetch(request)
+        .then((response) => {
+          if (!response || response.status !== 200 || response.type !== "basic") {
+            return response;
+          }
+
+          const responseClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
           return response;
         })
         .catch(() => caches.match("./index.html"));

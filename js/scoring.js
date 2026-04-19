@@ -17,6 +17,7 @@ export const BASELINE_STATS = {
 };
 
 export function createRun(modeId = "standard") {
+  const safeModeId = MODES[modeId] ? modeId : "standard";
   const stageProgress = STAGES.map((stage) => ({
     stageId: stage.id,
     completed: false,
@@ -25,7 +26,7 @@ export function createRun(modeId = "standard") {
 
   return {
     id: `run-${Date.now()}`,
-    modeId,
+    modeId: safeModeId,
     startedAt: Date.now(),
     updatedAt: Date.now(),
     currentStageIndex: 0,
@@ -34,6 +35,39 @@ export function createRun(modeId = "standard") {
     hiddenRisk: 0,
     totalScore: 0,
     decisions: [],
+    stageProgress,
+  };
+}
+
+export function sanitizeRun(run) {
+  if (!run || typeof run !== "object") return null;
+
+  const safeStageIndex = clamp(Number.isInteger(run.currentStageIndex) ? run.currentStageIndex : 0, 0, Math.max(0, STAGES.length - 1));
+  const stage = STAGES[safeStageIndex];
+  const safeLevelIndex = clamp(Number.isInteger(run.currentLevelIndex) ? run.currentLevelIndex : 0, 0, Math.max(0, stage.levels.length - 1));
+
+  const nextStats = { ...deepClone(BASELINE_STATS), ...(run.stats || {}) };
+  for (const key of Object.keys(BASELINE_STATS)) {
+    nextStats[key] = clamp(Number(nextStats[key]) || 0, 0, 100);
+  }
+
+  const stageProgress = STAGES.map((stageItem, index) => {
+    const source = Array.isArray(run.stageProgress) ? run.stageProgress[index] : null;
+    return {
+      stageId: stageItem.id,
+      completed: Boolean(source?.completed),
+      levelResults: Array.isArray(source?.levelResults) ? source.levelResults.filter(Boolean) : [],
+    };
+  });
+
+  return {
+    ...createRun(run.modeId),
+    ...run,
+    modeId: MODES[run.modeId] ? run.modeId : "standard",
+    currentStageIndex: safeStageIndex,
+    currentLevelIndex: safeLevelIndex,
+    stats: nextStats,
+    decisions: Array.isArray(run.decisions) ? run.decisions.filter(Boolean) : [],
     stageProgress,
   };
 }
@@ -49,7 +83,15 @@ export function applyEffects(stats, effects = {}) {
 
 export function evaluateDecisionLevel(run, level, selectedOptionId) {
   const option = level.options.find((item) => item.id === selectedOptionId);
-  if (!option) throw new Error("Invalid option selection");
+  if (!option) {
+    return {
+      nextStats: applyEffects(run.stats, { focus: -3, resilience: -3, "mental-stamina": -2 }),
+      score: -18,
+      outcomeLabel: classifyScore(-18),
+      feedback: "No valid decision was locked in before resolution. Under pressure, indecision is also a choice and it usually carries a cost.",
+      summary: "You failed to commit to a usable option in time.",
+    };
+  }
 
   let nextStats = applyEffects(run.stats, option.effects);
   let score = scoreFromEffects(option.effects);
@@ -64,7 +106,7 @@ export function evaluateDecisionLevel(run, level, selectedOptionId) {
     nextStats,
     score,
     outcomeLabel: classifyScore(score),
-    feedback: buildTradeoffFeedback(level, option, score),
+    feedback: buildTradeoffFeedback(option, score),
     summary: option.rationale,
   };
 }
@@ -74,6 +116,17 @@ export function evaluateAllocationLevel(run, level, selectedIds = []) {
   const spent = picked.reduce((sum, item) => sum + item.cost, 0);
   let score = 0;
   let nextStats = { ...run.stats };
+
+  if (!picked.length) {
+    return {
+      nextStats: applyEffects(run.stats, { focus: -4, resilience: -4, "strategic-clarity": -3 }),
+      score: -20,
+      spent: 0,
+      outcomeLabel: classifyScore(-20),
+      feedback: "You allocated nothing. In constrained environments, refusing to distribute scarce resources is itself a decision failure.",
+      summary: level.rationale,
+    };
+  }
 
   if (spent > level.pool) {
     score -= 12;
@@ -107,6 +160,16 @@ export function evaluatePriorityLevel(run, level, rankedIds = []) {
   let score = 0;
   let nextStats = { ...run.stats };
 
+  if (!rankedIds.length) {
+    return {
+      nextStats: applyEffects(run.stats, { focus: -4, "strategic-clarity": -4, resilience: -2 }),
+      score: -16,
+      outcomeLabel: classifyScore(-16),
+      feedback: "You did not establish an order of action. In ambiguity, weak sequencing often turns manageable situations into messy ones.",
+      summary: level.rationale,
+    };
+  }
+
   rankedIds.forEach((id, index) => {
     const item = level.items.find((entry) => entry.id === id);
     if (!item) return;
@@ -114,6 +177,10 @@ export function evaluatePriorityLevel(run, level, rankedIds = []) {
     const distance = Math.abs((index + 1) - item.idealRank);
     score += Math.max(0, 8 - distance * 3);
   });
+
+  if (rankedIds.length < level.items.length) {
+    score -= (level.items.length - rankedIds.length) * 4;
+  }
 
   return {
     nextStats,
@@ -130,11 +197,24 @@ export function evaluateContradictionLevel(run, level, selectedIds = []) {
   const selectedSet = new Set(selectedIds);
   const correctSet = new Set(level.correctIds);
 
+  if (!selectedSet.size) {
+    return {
+      nextStats: applyEffects(run.stats, { credibility: -3, adaptability: -2, "strategic-clarity": -4 }),
+      score: -16,
+      outcomeLabel: classifyScore(-16),
+      feedback: "You made no analytical call. In a noisy environment, failing to filter information can be as costly as believing the wrong thing.",
+      summary: level.rationale,
+    };
+  }
+
   const correctChosen = [...selectedSet].filter((id) => correctSet.has(id)).length;
   const incorrectChosen = [...selectedSet].filter((id) => !correctSet.has(id)).length;
 
   score += correctChosen * 8;
   score -= incorrectChosen * 4;
+  if (selectedSet.size !== level.correctIds.length) {
+    score -= Math.abs(selectedSet.size - level.correctIds.length) * 3;
+  }
 
   nextStats = applyEffects(nextStats, {
     "strategic-clarity": correctChosen * 3 - incorrectChosen * 2,
@@ -243,7 +323,7 @@ export function buildBehaviorProfile(finalStats, allLevelResults) {
   return { strengths, weaknesses, patterns, suggestions };
 }
 
-function buildTradeoffFeedback(level, option, score) {
+function buildTradeoffFeedback(option, score) {
   const polarity =
     score >= 22 ? "This was a resilient choice." :
     score >= 10 ? "This was adaptive but costly." :
@@ -291,10 +371,12 @@ export function buildStatCards(stats) {
 }
 
 export function getCurrentStage(run) {
-  return STAGES[run.currentStageIndex];
+  const safeRun = sanitizeRun(run);
+  return STAGES[safeRun?.currentStageIndex || 0];
 }
 
 export function getCurrentLevel(run) {
-  const stage = getCurrentStage(run);
-  return stage.levels[run.currentLevelIndex];
+  const safeRun = sanitizeRun(run);
+  const stage = getCurrentStage(safeRun);
+  return stage.levels[safeRun?.currentLevelIndex || 0];
 }

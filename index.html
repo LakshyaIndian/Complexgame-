@@ -25,7 +25,7 @@
         <section class="panel hero">
           <p class="eyebrow">Loading</p>
           <h2>Booting simulator</h2>
-          <p>The app shell is loading. If this takes more than a moment, the page will show a recovery panel automatically.</p>
+          <p>The app shell is loading a clean runtime. If startup fails, a recovery panel will appear automatically.</p>
         </section>
       </section>
     </main>
@@ -43,7 +43,7 @@
   </template>
 
   <script type="module">
-    const bootVersion = "2026-04-19-boot-2";
+    const bootVersion = "2026-04-19-cleanboot-3";
     const appRoot = document.getElementById("app");
 
     function renderBootError(error) {
@@ -54,7 +54,7 @@
           <section class="panel hero">
             <p class="eyebrow">Startup recovery</p>
             <h2>The simulator failed to start cleanly</h2>
-            <p>This usually means stale cached files or a module load failure. Use the actions below to recover.</p>
+            <p>The page attempted a clean boot without stale service worker or cache state. Use the actions below to recover.</p>
           </section>
           <section class="panel">
             <div class="button-row">
@@ -66,21 +66,39 @@
         </section>
       `;
 
-      document.getElementById("boot-reload")?.addEventListener("click", () => {
-        window.location.reload();
-      });
-
+      document.getElementById("boot-reload")?.addEventListener("click", () => window.location.reload());
       document.getElementById("boot-clear")?.addEventListener("click", () => {
-        try {
-          localStorage.removeItem("frs2050_state_v1");
-        } catch (storageError) {
-          console.error("Failed to clear local save", storageError);
-        }
+        try { localStorage.removeItem("frs2050_state_v1"); } catch (storageError) { console.error("Failed to clear local save", storageError); }
         window.location.reload();
       });
     }
 
-    import(`./js/app.js?v=${bootVersion}`).catch(renderBootError);
+    async function resetStaleRuntime() {
+      try {
+        if ("serviceWorker" in navigator) {
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(registrations.map((registration) => registration.unregister()));
+        }
+      } catch (error) {
+        console.warn("Could not unregister existing service workers", error);
+      }
+
+      try {
+        if ("caches" in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.filter((key) => key.startsWith("frs2050-cache")).map((key) => caches.delete(key)));
+        }
+      } catch (error) {
+        console.warn("Could not clear existing runtime caches", error);
+      }
+    }
+
+    try {
+      await resetStaleRuntime();
+      await import(`./js/app.js?v=${bootVersion}`);
+    } catch (error) {
+      renderBootError(error);
+    }
   </script>
 </body>
 </html>
